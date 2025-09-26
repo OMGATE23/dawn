@@ -1,0 +1,9 @@
+.venv
+uv.lock
+.env
+.env.local
+.DS_Store
+mcp.json
+__pycache__
+*.pyc
+*.db
