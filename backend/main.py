@@ -1,7 +1,10 @@
 import os
 import logging
+from pathlib import Path
 from flask import Flask, request, jsonify
-from flask_socketio import SocketIO, Namespace
+from flask_socketio.namespace import Namespace
+from flask_socketio import SocketIO
+
 from database.db import SQLiteDB
 from core.reasoning import ReasoningEngine
 from core.session import Session, InputMessage, MsgStatus
@@ -17,6 +20,9 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev")
 
 socketio = SocketIO(app, async_mode="eventlet", cors_allowed_origins="*")
+app.socketio = socketio
+# Workspace root for all sessions
+WORKSPACE_ROOT = Path(__file__).parent / "workspace"
 
 
 @app.route("/screenshot", methods=["POST"])
@@ -59,11 +65,16 @@ class ChatNamespace(Namespace):
 
     def on_chat(self, message: dict):
         logger.info(f"[/chat] on_chat: {message}")
-
+        print(f"[/chat] on_chat: {message}")
         db = SQLiteDB()
 
         try:
-            sess = Session(db=db, **message)
+            # Create session with app manager
+            sess = Session(
+                db=db, 
+                workspace_root=str(WORKSPACE_ROOT),
+                **message
+            )
             sess.create()
 
             inp = InputMessage(db=db, **message)

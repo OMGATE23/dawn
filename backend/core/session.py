@@ -1,6 +1,7 @@
+# session.py
 from enum import Enum
 from datetime import datetime
-from typing import Any, Optional, List, Union
+from typing import Any, Optional, List, Union, TYPE_CHECKING
 import uuid
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -8,6 +9,10 @@ from pydantic import BaseModel, Field, ConfigDict
 from database.db import SQLiteDB
 from core.enums import ToolStatus
 from flask_socketio import emit
+
+from pathlib import Path
+from core.docker_orchestrator import DockerOrchestrator
+
 
 class RoleTypes(str, Enum):
     system = "system"
@@ -42,7 +47,8 @@ class ToolContent(BaseModel):
 
 class TextContent(BaseModel):
     type: str = "text"
-    text: str
+    text: Optional[str] = None
+    status: MsgStatus = MsgStatus.progress
 
 class ImageContent(BaseModel):
     type: str = "image_url"
@@ -104,7 +110,7 @@ class BaseMessage(BaseModel):
     ] = []
     status: MsgStatus = MsgStatus.success
     msg_id: str = Field(
-        default_factory=lambda: str(datetime.now().timestamp() * 100000)
+        default_factory=lambda: str(uuid.uuid4())
     )
 
 
@@ -113,7 +119,6 @@ class InputMessage(BaseMessage):
     msg_type: MsgType = MsgType.input
 
     def publish(self):
-        emit("chat", self.model_dump(exclude={"db"}), namespace="/chat")
         self.db.add_or_update_msg_to_conv(**self.model_dump(exclude={"db"}))
 
 
@@ -127,8 +132,18 @@ class OutputMessage(BaseMessage):
         self.publish()
 
     def publish(self):
-        emit("chat", self.model_dump(), namespace="/chat")
-        self.db.add_or_update_msg_to_conv(**self.model_dump())
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            emit("chat", self.model_dump(), namespace="/chat")
+        except Exception as e:
+            logger.error(f"Failed to emit message via socket: {e}")
+        
+        try:
+            self.db.add_or_update_msg_to_conv(**self.model_dump())
+        except Exception as e:
+            logger.error(f"Failed to save message to database: {e}")
 
 
 class ContextMessage(BaseModel):
@@ -145,6 +160,9 @@ class ContextMessage(BaseModel):
     role: RoleTypes = RoleTypes.system
 
     def to_llm_msg(self):
+        import logging
+        logger = logging.getLogger(__name__)
+        
         msg = {
             "role": self.role,
             "content": self.content,
@@ -165,6 +183,9 @@ class ContextMessage(BaseModel):
         if self.role == RoleTypes.tool:
             msg["tool_call_id"] = self.tool_call_id
             return msg
+        
+        logger.warning(f"Unexpected role type: {self.role}")
+        return msg
 
     @classmethod
     def from_json(cls, json_data):
@@ -176,6 +197,7 @@ class Session:
     def __init__(
         self,
         db: SQLiteDB,
+        workspace_root: str,
         session_id: str = "",
         conv_id: str = "",
         **kwargs,
@@ -188,6 +210,11 @@ class Session:
         self.state = {}
         self.output_message = OutputMessage(
             db=self.db, session_id=self.session_id, conv_id=self.conv_id, msg_id=str(uuid.uuid4())
+        )
+
+        self.docker_engine = DockerOrchestrator(
+            session_id=self.session_id,
+            workspace_root=Path(workspace_root)
         )
 
         self.get_context_messages()
@@ -209,7 +236,7 @@ class Session:
         return self.reasoning_context
 
     def create(self):
-        self.db.create_session(**self.__dict__)
+        self.db.create_session(session_id=self.session_id)
 
     def get(self):
         session = self.db.get_session(self.session_id)
